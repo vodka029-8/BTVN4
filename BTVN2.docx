@@ -1,0 +1,126 @@
+Bước 1: Đề xuất 2 Prompt mẫu
+Giải pháp 1: Prompt đơn giản, ngắn gọn (Zero-shot + CoT cơ bản)
+Tập trung vào tốc độ triển khai, diễn đạt tự nhiên, yêu cầu AI suy luận theo từng bước nhưng không ép schema phức tạp hay nhiều lớp rào chắn dữ liệu.
+text
+Bạn là nhân viên CSKH của cửa hàng. Hãy xử lý yêu cầu đổi trả của khách theo các bước sau:
+1. Kiểm tra xem thông tin đơn hàng có bị thiếu hoặc vô lý không. Nếu thiếu/sai thì yêu cầu khách bổ sung, không tự quyết định.
+2. Phân loại vấn đề của khách (lỗi sản phẩm, giao sai, vận chuyển hay đổi ý).
+3. Đối chiếu số ngày từ lúc nhận hàng với chính sách đổi trả 7 ngày để đưa ra hướng giải quyết và viết tin nhắn phản hồi khách.
+
+Dữ liệu khách gửi:
+- Mã đơn: {order_id}
+- Tin nhắn: {customer_message}
+- Số ngày từ khi nhận: {days_since_delivery}
+- Tình trạng hàng: {item_condition} 
+ 
+ 
+Giải pháp 2: Prompt chi tiết, nhiều ràng buộc (Structured CoT + Prompt Chaining + Guardrails)
+Tách bạch rõ các bước trong chuỗi logic, cài đặt sẵn điều kiện bắt bẫy dữ liệu biên và ép đầu ra về định dạng JSON cố định để tích hợp vào hệ thống tự động.
+text
+Bạn là hệ thống tự động hóa xử lý khiếu nại đơn hàng. Thực hiện nghiêm ngặt chuỗi xử lý 3 bước (Prompt Chaining & Chain-of-Thought) dưới đây. Tuyệt đối không tự suy đoán dữ liệu bị thiếu.
+
+### QUY TẮC BẪY DỮ LIỆU & XỬ LÝ ĐỨT GÃY:
+- Nếu `order_id` trống hoặc sai định dạng (không gồm chữ + số) -> ghi nhận lỗi.
+- Nếu `days_since_delivery` trống, không phải số nguyên hoặc < 0 -> ghi nhận lỗi.
+- Nếu `item_condition` không nằm trong danh sách [`nguyên vẹn`, `lỗi sản xuất`, `hư hại do vận chuyển`] -> ghi nhận lỗi.
+- Cơ chế ngắt mạch (Fallback): Nếu có bất kỳ trường lỗi nào ở trên, đặt `status = "FALLBACK_NEEDED"` (hoặc `"INVALID_INPUT"` nếu dữ liệu mâu thuẫn/âm), dừng bước phê duyệt đổi trả và chuyển cho bộ phận `CSKH` hỏi lại đúng thông tin thiếu.
+
+### CHUỖI SUY LUẬN LOGIC (CHAIN OF THOUGHT):
+- Bước 1 (Validation): Kiểm tra từng trường dữ liệu đầu vào và liệt kê trường lỗi.
+- Bước 2 (Classification): Phân loại nhóm sự cố và gắn mức ưu tiên (`HIGH` cho lỗi kỹ thuật/hư hại, `MEDIUM` cho đổi ý/quá hạn, `LOW` cho ca thiếu thông tin).
+- Bước 3 (Policy & Action): Đối chiếu `days_since_delivery <= 7` và `item_condition` để chốt phương án xử lý và soạn mẫu phản hồi.
+
+### ĐỊNH DẠNG ĐẦU RA (CHỈ TRẢ VỀ JSON):
+{
+  "status": "SUCCESS | FALLBACK_NEEDED | INVALID_INPUT",
+  "invalid_fields": [],
+  "reasoning_chain": {
+    "step_1_validation": "",
+    "step_2_classification": "",
+    "step_3_policy": ""
+  },
+  "action": {
+    "priority": "HIGH | MEDIUM | LOW",
+    "decision": "",
+    "reply_to_customer": "",
+    "route_to": "CSKH | KHO | QUAN_LY"
+  }
+}
+
+### INPUT:
+- order_id: {order_id}
+- customer_message: {customer_message}
+- days_since_delivery: {days_since_delivery}
+- item_condition: {item_condition}
+ 
+ 
+Bước 2: Lập bảng so sánh Trade-off
+Hỏi về
+Tiêu chí đánh giá
+Giải pháp 1 (Đơn giản)
+Giải pháp 2 (Chi tiết)
+Phân tích đánh đổi (Trade-off)
+Độ dễ hiểu
+Cao (ngắn gọn, ngôn ngữ tự nhiên, ai cũng đọc hiểu ngay).
+Trung bình (dài, nhiều cấu trúc điều kiện và quy tắc kỹ thuật).
+Giải pháp 1 dễ viết và dễ sửa bằng tay, nhưng khó kiểm soát khi hệ thống mở rộng.
+Tốn token
+Ít (~110 token đầu vào).
+Nhiều hơn (~320 token đầu vào).
+Giải pháp 2 tốn chi phí API gấp ~3 lần trên mỗi lượt gọi do chứa luật ràng buộc và schema JSON.
+Chặn lỗi biên
+Trung bình (dễ bỏ sót ca số âm, sai định dạng mã đơn hoặc tự suy diễn).
+Cực tốt (bắt chính xác dữ liệu rỗng, sai kiểu, mâu thuẫn và ngắt mạch an toàn).
+Giải pháp 2 loại bỏ được rủi ro AI "ảo giác" hoặc duyệt nhầm đơn khi thiếu dữ liệu đầu vào.
+Tính ổn định đầu ra
+Thấp (trả về văn bản tự do, khó kết nối với phần mềm/webhook).
+Cao (luôn trả về JSON đúng trường dữ liệu để hệ thống đọc tự động).
+Giải pháp 1 chỉ phù hợp để nhân viên đọc tham khảo; Giải pháp 2 dùng được cho tự động hóa thật.
+ 
+Bước 3: Lựa chọn phương án tối ưu và chạy thử
+3.1. Lựa chọn và giải thích lý do
+ 
+• Phương án được chọn: Giải pháp 2 (Chi tiết, có nhiều ràng buộc).
+• Lý do lựa chọn:
+1. An toàn nghiệp vụ: Trong quy trình đổi trả của cửa hàng, việc chặn sai sót tài chính (duyệt nhầm đơn quá hạn hoặc thiếu thông tin) quan trọng hơn việc tiết kiệm một lượng nhỏ token.
+2. Xử lý đứt gãy triệt để: Cơ chế ngắt mạch (FALLBACK_NEEDED) giúp chuỗi xử lý không bị gãy giữa chừng hoặc sinh ra kết luận sai lệch khi khách hàng nhập thiếu thông tin.
+3. Sẵn sàng tích hợp tự động hóa: Đầu ra chuẩn JSON giúp hệ thống tự động phân luồng ticket sang đúng bộ phận (CSKH, KHO, QUAN_LY) mà không cần con người đọc lại toàn bộ văn bản.
+ 
+3.2. Kết quả chạy thử thực tế (Test với dữ liệu bẫy biên)
+Dữ liệu đầu vào kiểm thử (Trường hợp dữ liệu mâu thuẫn & sai định dạng):
+ 
+• order_id: "123" (sai định dạng thiếu tiền tố chữ)
+• customer_message: "Hàng dùng tốt nhưng mình đổi ý không thích màu này nữa, cho trả lại nhé."
+• days_since_delivery: -3 (lỗi số âm vô lý)
+• item_condition: "nguyên vẹn"
+ 
+Kết quả phản hồi từ AI (Giải pháp 2):
+json
+{
+  "status": "INVALID_INPUT"
+,
+  "invalid_fields"
+: [
+    "order_id"
+,
+    "days_since_delivery"
+  ],
+  "reasoning_chain"
+: {
+    "step_1_validation": "order_id '123' sai định dạng (thiếu ký tự chữ đi kèm số); days_since_delivery có giá trị -3 là số âm vô lý. Các trường customer_message và item_condition hợp lệ."
+,
+    "step_2_classification": "Yêu cầu đổi ý trả hàng, gắn mức ưu tiên LOW vì dữ liệu đầu vào đang bị sai lệch, chưa thể xử lý nghiệp vụ."
+,
+    "step_3_policy": "Kích hoạt cơ chế ngắt mạch xử lý đứt gãy do phát hiện dữ liệu mâu thuẫn (-3 ngày) và sai mã đơn. Tạm dừng áp dụng chính sách 7 ngày và chuyển CSKH xác minh lại."
+  },
+  "action"
+: {
+    "priority": "LOW"
+,
+    "decision": "Tạm dừng duyệt đổi trả, yêu cầu khách cung cấp lại đúng mã đơn hàng và thời gian nhận hàng thực tế."
+,
+    "reply_to_customer": "Chào bạn, để hỗ trợ kiểm tra yêu cầu đổi trả sản phẩm, bạn vui lòng cung cấp lại chính xác mã đơn hàng (ví dụ: DH123) và ngày bạn nhận được hàng giúp cửa hàng nhé!"
+,
+    "route_to": "CSKH"
+  }
+}

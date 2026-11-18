@@ -1,0 +1,229 @@
+Phần 1: Báo cáo thiết kế giải pháp (Kiến trúc chuỗi khép kín)
+1.1. Sơ đồ luồng dữ liệu & Cơ chế chống đứt gãy
+Hệ thống chia bài toán lớn thành 3 Prompt độc lập chạy tuần tự, đầu ra JSON của bước trước là đầu vào trực tiếp của bước sau:
+• Prompt 1 (Bộ lọc & Chuẩn hóa – Gatekeeper): Kiểm tra dữ liệu thô, làm sạch, phát hiện giá trị dị biệt/trống. Nếu lỗi nghiêm trọng, kích hoạt cờ halt = true để ngắt chuỗi ngay lập tức, tiết kiệm token cho các bước sau.
+• Prompt 2 (Suy luận chính sách – CoT Engine): Nhận JSON sạch từ Prompt 1, suy luận từng bước (Chain-of-Thought) đối chiếu tình trạng hàng và thời hạn bảo hành/đổi trả để ra quyết định nghiệp vụ.
+• Prompt 3 (Điều phối & Soạn phản hồi – Action Dispatcher): Nhận quyết định từ Prompt 2, tạo phản hồi đúng ngữ điệu cho khách và xuất lệnh điều phối nội bộ (KHO,CSKH, KE_TOAN).
+1.2. Chiến lược tối ưu Token & Chống crash hệ thống
+• Tối ưu token: Không nhồi toàn bộ quy tắc vào 1 prompt khổng lồ. Mỗi bước chỉ nhận đúng các trường JSON cần thiết từ bước trước, dùng khóa JSON ngắn gọn và giới hạn độ dài suy luận.
+• Chống đứt gãy (Circuit Breaker): Mọi prompt đều bắt buộc trả về JSON hợp lệ theo schema cứng. Khi dữ liệu dị biệt (ví dụ: ngày âm, ký tự rác, thiếu mã đơn), hệ thống chuyển sang trạng thái FALLBACK thay vì báo lỗi cú pháp hoặc tự bịa câu trả lời.
+ 
+Phần 2: Hệ thống Prompt thực thi 3 bước (Prompt Chaining)
+Bước 1: Prompt 1 – Kiểm tra & Làm sạch dữ liệu (Gatekeeper)
+text
+Bạn là bộ lọc dữ liệu đầu vào (Gatekeeper). Nhiệm vụ: kiểm tra dữ liệu thô và chuẩn hóa thành JSON sạch.
+
+### QUY TẮC BẮT LỖI DỊ BIỆT:
+1. `order_id`: Phải khớp mẫu chữ + số (vd: DH102). Nếu trống/rác -> thêm vào `errors`.
+2. `days`: Số ngày từ lúc nhận hàng, phải là số nguyên >= 0 và <= 365. Nếu trống, chữ, âm hoặc > 365 -> thêm vào `errors`.
+3. `condition`: Chỉ nhận `loi_nsx`, `hu_van_chuyen`, `nguyen_ven`. Nếu khác -> gán `unknown` và thêm vào `errors`.
+4. `note`: Tóm tắt ý chính khiếu nại trong tối đa 25 từ (loại bỏ ký tự rác/emoji dư thừa để tiết kiệm token). Nếu trống -> thêm vào `errors`.
+5. Nếu `errors` không rỗng -> đặt `halt = true`, ngược lại `halt = false`.
+
+### ĐỊNH DẠNG ĐẦU RA (CHỈ TRẢ VỀ JSON):
+{
+  "halt": true | false,
+  "errors": [],
+  "clean_data": {
+    "order_id": "",
+    "days": null,
+    "condition": "",
+    "note": ""
+  }
+}
+
+### INPUT THÔ:
+{raw_input}
+ 
+ 
+Bước 2: Prompt 2 – Suy luận nghiệp vụ theo chuỗi (CoT Engine)
+text
+Bạn là bộ máy suy luận chính sách đổi trả (CoT Engine). Chỉ xử lý dựa trên JSON đầu vào từ Bước 1.
+
+### ĐIỀU KIỆN NGẮT MẠCH:
+- Nếu `halt == true`: Không suy luận chính sách. Trả về ngay `decision = "NEED_MORE_INFO"` và liệt kê các trường trong `errors` cần hỏi lại khách.
+
+### CHUỖI SUY LUẬN LOGIC (Nếu `halt == false`):
+- Bước 1 (Xét lỗi): `loi_nsx` hoặc `hu_van_chuyen` -> lỗi thuộc cửa hàng/vận chuyển. `nguyen_ven` -> lỗi chủ quan từ khách.
+- Bước 2 (Xét thời hạn):
+  + Lỗi cửa hàng/vận chuyển + `days <= 15`: Đổi mới miễn phí (`APPROVE_EXCHANGE`).
+  + Lỗi cửa hàng/vận chuyển + `days > 15`: Chuyển bảo hành (`WARRANTY_REPAIR`).
+  + `nguyen_ven` + `days <= 7`: Cho đổi mẫu khác, khách chịu phí ship (`CONDITIONAL_EXCHANGE`).
+  + `nguyen_ven` + `days > 7`: Từ chối đổi trả (`REJECT_EXPIRED`).
+
+### ĐỊNH DẠNG ĐẦU RA (CHỈ TRẢ VỀ JSON):
+{
+  "order_id": "",
+  "cot_steps": [
+    "Bước 1: ...",
+    "Bước 2: ..."
+  ],
+  "decision": "APPROVE_EXCHANGE | WARRANTY_REPAIR | CONDITIONAL_EXCHANGE | REJECT_EXPIRED | NEED_MORE_INFO",
+  "missing_fields": [],
+  "target_team": "KHO | BAO_HANH | CSKH"
+}
+
+### INPUT TỪ BƯỚC 1:
+{output_prompt_1}
+ 
+ 
+Bước 3: Prompt 3 – Điều phối & Tạo phản hồi sạch lỗi (Action Dispatcher)
+text
+Bạn là hệ thống điều phối CSKH. Dựa vào kết quả từ Bước 2, hãy tạo phản hồi ngắn gọn, lịch sự cho khách hàng và xuất lệnh nội bộ.
+
+### RÀNG BUỘC:
+- Không lộ thuật ngữ kỹ thuật nội bộ (như `halt`, `APPROVE_EXCHANGE`, `cot_steps`) cho khách hàng.
+- Nếu `decision == "NEED_MORE_INFO"`: Chỉ hỏi đúng các trường nằm trong `missing_fields`.
+- Tối ưu độ dài: `customer_message` tối đa 60 từ.
+
+### ĐỊNH DẠNG ĐẦU RA (CHỈ TRẢ VỀ JSON):
+{
+  "ticket_status": "READY_TO_SEND",
+  "route_to": "",
+  "customer_message": "",
+  "internal_note": ""
+}
+
+### INPUT TỪ BƯỚC 2:
+{output_prompt_2}
+Hỏi về
+ 
+ 
+ 
+Phần 3: Kết quả chạy thử thực tế (2 kịch bản kiểm thử)
+Kịch bản A: Dữ liệu hợp lệ xuyên suốt chuỗi (Luồng chuẩn)
+Input thô đưa vào Prompt 1:
+json
+{
+  "order_id": "DH509"
+,
+  "days": 10
+,
+  "condition": "loi_nsx"
+,
+  "note": "Loa bluetooth nhận được 10 ngày rồi nhưng tự nhiên sạc không vào điện nữa shop ơi!!!"
+}
+• Output Prompt 1 (Đã nén note để tiết kiệm token):
+json
+{
+  "halt": false
+,
+  "errors"
+: [],
+  "clean_data"
+: {
+    "order_id": "DH509"
+,
+    "days": 10
+,
+    "condition": "loi_nsx"
+,
+    "note": "Loa bluetooth sạc không vào điện sau 10 ngày sử dụng."
+  }
+}
+ 
+ 
+• Output Prompt 2 (Suy luận CoT):
+json
+{
+  "order_id": "DH509"
+,
+  "cot_steps"
+: [
+    "Bước 1: condition là loi_nsx, xác định lỗi kỹ thuật từ nhà sản xuất."
+,
+    "Bước 2: days = 10 <= 15 ngày quy định cho lỗi sản xuất, đủ điều kiện đổi mới miễn phí."
+  ],
+  "decision": "APPROVE_EXCHANGE"
+,
+  "missing_fields"
+: [],
+  "target_team": "KHO"
+}
+
+ 
+ 
+• Output Prompt 3 (Kết quả cuối cùng sạch lỗi):
+json
+{
+  "ticket_status": "READY_TO_SEND"
+,
+  "route_to": "KHO"
+,
+  "customer_message": "Chào bạn, cửa hàng rất tiếc về sự cố loa bluetooth ở đơn DH509. Sản phẩm của bạn đủ điều kiện đổi mới miễn phí. Nhân viên kho sẽ liên hệ gửi sản phẩm mới và thu hồi máy lỗi trong hôm nay nhé!"
+,
+  "internal_note": "Đơn DH509 duyệt đổi mới miễn phí do lỗi NSX (ngày thứ 10)."
+}
+ 
+ 
+Kịch bản B: Dữ liệu dị biệt & thiếu thông tin (Kiểm thử xử lý đứt gãy)
+Input thô đưa vào Prompt 1:
+json
+{
+  "order_id": "###"
+,
+  "days": -5
+,
+  "condition": "khong_ro"
+,
+  "note": "Hàng bị móp góc"
+}
+ 
+• Output Prompt 1 (Kích hoạt ngắt mạch halt: true):
+json
+{
+  "halt": true
+,
+  "errors"
+: [
+    "order_id"
+,
+    "days"
+,
+    "condition"
+  ],
+  "clean_data"
+: {
+    "order_id": "###"
+,
+    "days": null
+,
+    "condition": "unknown"
+,
+    "note": "Hàng bị móp góc."
+  }
+}
+ 
+• Output Prompt 2 (Nhận tín hiệu ngắt mạch, bỏ qua suy luận chính sách để chống ảo giác):
+json
+{
+  "order_id": "###"
+,
+  "cot_steps"
+: [
+    "Phát hiện cờ halt = true từ Bước 1, dừng quy trình xét duyệt chính sách để tránh sai lệch."
+  ],
+  "decision": "NEED_MORE_INFO"
+,
+  "missing_fields"
+: [
+    "order_id"
+,
+    "days"
+,
+    "condition"
+  ],
+  "target_team": "CSKH"
+}
+ 
+• Output Prompt 3 (Phản hồi an toàn, không crash hệ thống):
+json
+{
+  "ticket_status": "READY_TO_SEND"
+,
+  "route_to": "CSKH"
+,
+  "customer_message": "Chào bạn, để hỗ trợ kiểm tra tình trạng hàng bị móp góc, bạn vui lòng cung cấp giúp shop mã đơn hàng chính xác, ngày nhận hàng và xác nhận lỗi phát sinh do vận chuyển hay từ trước khi mở hộp nhé!"
+,
+  "internal_note": "Dữ liệu đầu vào lỗi (order_id, days, condition). Chuyển CSKH xác minh lại."
+}
